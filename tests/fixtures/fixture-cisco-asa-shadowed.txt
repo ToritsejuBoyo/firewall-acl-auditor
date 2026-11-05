@@ -1,0 +1,9 @@
+! Synthetic Cisco ASA Configuration Export
+! For automated testing of firewall-acl-auditor
+! Device: SYNTHETIC-MOCK-ASA-01
+access-list SYNTHETIC-OUTSIDE-IN extended permit ip 192.0.2.0 255.255.255.0 any
+access-list SYNTHETIC-OUTSIDE-IN extended deny tcp 192.0.2.128 255.255.255.128 any eq 443
+access-list SYNTHETIC-OUTSIDE-IN extended permit tcp 192.0.2.0 255.255.255.0 any eq 80
+access-list SYNTHETIC-OUTSIDE-IN extended permit tcp any host 198.51.100.25 eq 23
+access-list SYNTHETIC-OUTSIDE-IN extended permit ip any any
+access-list SYNTHETIC-OUTSIDE-IN extended deny ip host 203.0.113.50 any inactive

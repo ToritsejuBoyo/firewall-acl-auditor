@@ -1,0 +1,66 @@
+# Synthetic Fortinet FortiGate Configuration Export
+! For automated testing of firewall-acl-auditor
+# Device: SYNTHETIC-MOCK-FORTIGATE-01
+config firewall policy
+    edit 10
+        set name "SYNTHETIC-PERMIT-SUBNET1"
+        set srcintf "port1"
+        set dstintf "port2"
+        set srcaddr "192.0.2.0/24"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+    next
+    edit 20
+        set name "SYNTHETIC-PERMIT-WEB"
+        set srcintf "port1"
+        set dstintf "port2"
+        set srcaddr "192.0.2.0/24"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "HTTPS"
+    next
+    edit 30
+        set name "SYNTHETIC-BLOCK-SUBRANGE"
+        set srcintf "port1"
+        set dstintf "port2"
+        set srcaddr "192.0.2.64/26"
+        set dstaddr "all"
+        set action deny
+        set schedule "always"
+        set service "ALL"
+    next
+    edit 40
+        set name "SYNTHETIC-PERMIT-TELNET"
+        set srcintf "port1"
+        set dstintf "port2"
+        set srcaddr "all"
+        set dstaddr "198.51.100.50/32"
+        set action accept
+        set schedule "always"
+        set service "TELNET"
+    next
+    edit 50
+        set name "SYNTHETIC-ANY-ANY"
+        set srcintf "port1"
+        set dstintf "port2"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+    next
+    edit 60
+        set name "SYNTHETIC-DISABLED-RULE"
+        set srcintf "port1"
+        set dstintf "port2"
+        set srcaddr "203.0.113.0/24"
+        set dstaddr "all"
+        set action deny
+        set status disable
+        set schedule "always"
+        set service "ALL"
+    next
+end

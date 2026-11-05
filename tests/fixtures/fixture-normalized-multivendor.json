@@ -1,0 +1,74 @@
+[
+  {
+    "rule_id": "RULE-101",
+    "vendor": "generic",
+    "action": "permit",
+    "protocol": "ip",
+    "src_prefixes": ["192.0.2.0/24"],
+    "dst_prefixes": ["0.0.0.0/0"],
+    "src_ports": ["any"],
+    "dst_ports": ["any"],
+    "status": "enabled",
+    "comment": "SYNTHETIC-PERMIT-OFFICE"
+  },
+  {
+    "rule_id": "RULE-102",
+    "vendor": "generic",
+    "action": "deny",
+    "protocol": "tcp",
+    "src_prefixes": ["192.0.2.128/25"],
+    "dst_prefixes": ["0.0.0.0/0"],
+    "src_ports": ["any"],
+    "dst_ports": ["443"],
+    "status": "enabled",
+    "comment": "SYNTHETIC-SHADOWED-DENY-HTTPS"
+  },
+  {
+    "rule_id": "RULE-103",
+    "vendor": "generic",
+    "action": "permit",
+    "protocol": "tcp",
+    "src_prefixes": ["192.0.2.0/24"],
+    "dst_prefixes": ["0.0.0.0/0"],
+    "src_ports": ["any"],
+    "dst_ports": ["80"],
+    "status": "enabled",
+    "comment": "SYNTHETIC-REDUNDANT-HTTP"
+  },
+  {
+    "rule_id": "RULE-104",
+    "vendor": "generic",
+    "action": "permit",
+    "protocol": "tcp",
+    "src_prefixes": ["0.0.0.0/0"],
+    "dst_prefixes": ["198.51.100.25/32"],
+    "src_ports": ["any"],
+    "dst_ports": ["23"],
+    "status": "enabled",
+    "comment": "SYNTHETIC-INSECURE-TELNET"
+  },
+  {
+    "rule_id": "RULE-105",
+    "vendor": "generic",
+    "action": "permit",
+    "protocol": "ip",
+    "src_prefixes": ["0.0.0.0/0"],
+    "dst_prefixes": ["0.0.0.0/0"],
+    "src_ports": ["any"],
+    "dst_ports": ["any"],
+    "status": "enabled",
+    "comment": "SYNTHETIC-OVERLY-PERMISSIVE-ANY-ANY"
+  },
+  {
+    "rule_id": "RULE-106",
+    "vendor": "generic",
+    "action": "deny",
+    "protocol": "ip",
+    "src_prefixes": ["203.0.113.50/32"],
+    "dst_prefixes": ["0.0.0.0/0"],
+    "src_ports": ["any"],
+    "dst_ports": ["any"],
+    "status": "disabled",
+    "comment": "SYNTHETIC-DISABLED-ZOMBIE"
+  }
+]
