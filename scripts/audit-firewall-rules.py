@@ -81,6 +81,7 @@ class NormalizedRule:
   enabled: bool
   raw_line: str
   comment: str = ""
+  conn_state: str = ""
 
   def to_dict(self) -> Dict[str, Any]:
     return asdict(self)
@@ -180,6 +181,26 @@ def normalize_network(net_str: Any) -> ipaddress.IPv4Network:
     return ipaddress.IPv4Network("0.0.0.0/0")
 
 
+@functools.lru_cache(maxsize=8192)
+def network_to_int_tuple(net_str: Any) -> Tuple[int, int, int]:
+  s = str(net_str).strip().lower()
+  if s in ("any", "any4", "all", "0.0.0.0/0", "0.0.0.0 255.255.255.255", ""):
+    return (0, 0xFFFFFFFF, 0)
+  try:
+    net = ipaddress.IPv4Network(s, strict=False)
+    return (int(net.network_address), int(net.broadcast_address), net.prefixlen)
+  except (ValueError, TypeError):
+    return (0, 0xFFFFFFFF, 0)
+
+
+def is_subnet_fast(sub_tuple: Tuple[int, int, int], super_tuple: Tuple[int, int, int]) -> bool:
+  return (
+      super_tuple[2] <= sub_tuple[2]
+      and super_tuple[0] <= sub_tuple[0]
+      and super_tuple[1] >= sub_tuple[1]
+  )
+
+
 def is_proto_superset(super_proto: str, sub_proto: str) -> bool:
   sp = super_proto.lower()
   subp = sub_proto.lower()
@@ -189,31 +210,63 @@ def is_proto_superset(super_proto: str, sub_proto: str) -> bool:
 
 
 @functools.lru_cache(maxsize=4096)
-def parse_port_range(p_str: Any) -> Tuple[int, int]:
+def parse_port_intervals(p_str: Any) -> Tuple[Tuple[int, int], ...]:
   s = str(p_str).strip().lower()
   if s in ("any", "all", ""):
+    return ((0, 65535),)
+
+  intervals: List[Tuple[int, int]] = []
+  tokens = [t.strip().strip('"') for t in s.split(",") if t.strip()]
+  if not tokens:
+    return ((0, 65535),)
+
+  for tok in tokens:
+    if tok in WELL_KNOWN_PORT_NAMES:
+      val = WELL_KNOWN_PORT_NAMES[tok]
+      intervals.append((val, val))
+    elif "-" in tok:
+      parts = tok.split("-", 1)
+      try:
+        p1, p2 = int(parts[0]), int(parts[1])
+        lo, hi = min(p1, p2), max(p1, p2)
+        intervals.append((max(0, min(65535, lo)), max(0, min(65535, hi))))
+      except ValueError:
+        pass
+    else:
+      try:
+        val = max(0, min(65535, int(tok)))
+        intervals.append((val, val))
+      except ValueError:
+        pass
+
+  if not intervals:
+    return ((0, 65535),)
+
+  return tuple(sorted(intervals))
+
+
+@functools.lru_cache(maxsize=4096)
+def parse_port_range(p_str: Any) -> Tuple[int, int]:
+  intervals = parse_port_intervals(p_str)
+  if not intervals:
     return (0, 65535)
-  if s in WELL_KNOWN_PORT_NAMES:
-    val = WELL_KNOWN_PORT_NAMES[s]
-    return (val, val)
-  if "-" in s:
-    parts = s.split("-", 1)
-    try:
-      p1, p2 = int(parts[0]), int(parts[1])
-      return (max(0, min(65535, min(p1, p2))), max(0, min(65535, max(p1, p2))))
-    except ValueError:
-      return (0, 65535)
-  try:
-    val = max(0, min(65535, int(s)))
-    return (val, val)
-  except ValueError:
-    return (0, 65535)
+  return intervals[0]
 
 
 def is_port_superset(super_port: str, sub_port: str) -> bool:
-  lo1, hi1 = parse_port_range(super_port)
-  lo2, hi2 = parse_port_range(sub_port)
-  return lo1 <= lo2 and hi1 >= hi2
+  if super_port in ("any", "all", ""):
+    return True
+  if super_port == sub_port:
+    return True
+
+  super_intervals = parse_port_intervals(super_port)
+  sub_intervals = parse_port_intervals(sub_port)
+
+  for sub_lo, sub_hi in sub_intervals:
+    covered = any(sup_lo <= sub_lo and sup_hi >= sub_hi for sup_lo, sup_hi in super_intervals)
+    if not covered:
+      return False
+  return True
 
 
 def is_rule_superset(r_super: NormalizedRule, r_sub: NormalizedRule) -> bool:
@@ -221,15 +274,23 @@ def is_rule_superset(r_super: NormalizedRule, r_sub: NormalizedRule) -> bool:
     return False
   if not is_proto_superset(r_super.protocol, r_sub.protocol):
     return False
-  net_src_super = normalize_network(r_super.src_cidr)
-  net_src_sub = normalize_network(r_sub.src_cidr)
-  net_dst_super = normalize_network(r_super.dst_cidr)
-  net_dst_sub = normalize_network(r_sub.dst_cidr)
 
-  if not net_src_sub.subnet_of(net_src_super):
+  # Connection state: a state-constrained rule (e.g. established,related) cannot shadow an unconstrained rule
+  if r_super.conn_state and not r_sub.conn_state:
     return False
-  if not net_dst_sub.subnet_of(net_dst_super):
+  if r_super.conn_state and r_sub.conn_state and r_super.conn_state != r_sub.conn_state:
     return False
+
+  # Fast-path for source CIDR
+  if r_super.src_cidr != "0.0.0.0/0" and r_super.src_cidr != r_sub.src_cidr:
+    if not is_subnet_fast(network_to_int_tuple(r_sub.src_cidr), network_to_int_tuple(r_super.src_cidr)):
+      return False
+
+  # Fast-path for destination CIDR
+  if r_super.dst_cidr != "0.0.0.0/0" and r_super.dst_cidr != r_sub.dst_cidr:
+    if not is_subnet_fast(network_to_int_tuple(r_sub.dst_cidr), network_to_int_tuple(r_super.dst_cidr)):
+      return False
+
   if not is_port_superset(r_super.dst_port, r_sub.dst_port):
     return False
   return True
@@ -369,6 +430,7 @@ def parse_mikrotik(text: str) -> List[NormalizedRule]:
     src_m = re.search(r"src-address=(\S+)", raw)
     dst_m = re.search(r"dst-address=(\S+)", raw)
     port_m = re.search(r"dst-port=(\S+)", raw)
+    conn_m = re.search(r"connection-state=(\S+)", raw)
     dis_m = re.search(r"disabled=(yes|true)", raw, re.IGNORECASE)
     comment_m = re.search(r'comment="?([^"\n]+)"?', raw)
 
@@ -380,6 +442,7 @@ def parse_mikrotik(text: str) -> List[NormalizedRule]:
     dst = dst_m.group(1) if dst_m else "0.0.0.0/0"
     port = port_m.group(1) if port_m else "any"
     comment = comment_m.group(1) if comment_m else f"rule-{idx}"
+    conn_state = conn_m.group(1).lower() if conn_m else ""
 
     rules.append(
         NormalizedRule(
@@ -394,6 +457,7 @@ def parse_mikrotik(text: str) -> List[NormalizedRule]:
             enabled=not bool(dis_m),
             raw_line=raw,
             comment=comment,
+            conn_state=conn_state,
         )
     )
   return rules
@@ -411,7 +475,7 @@ def parse_fortigate(text: str) -> List[NormalizedRule]:
     srcaddr = re.search(r'set srcaddr\s+"?([^"\n]+)"?', body)
     dstaddr = re.search(r'set dstaddr\s+"?([^"\n]+)"?', body)
     action_m = re.search(r"set action\s+(\S+)", body)
-    service_m = re.search(r'set service\s+"?([^"\n]+)"?', body)
+    service_m = re.search(r'set service\s+(.*)', body)
     status_m = re.search(r"set status\s+(disable)", body)
 
     s_int = srcintf.group(1).strip() if srcintf else "any"
@@ -424,14 +488,32 @@ def parse_fortigate(text: str) -> List[NormalizedRule]:
     )
     s_addr = srcaddr.group(1).strip() if srcaddr else "all"
     d_addr = dstaddr.group(1).strip() if dstaddr else "all"
-    svc = service_m.group(1).strip().lower() if service_m else "all"
-    comment = name_m.group(1) if name_m else f"policy-{pol_id}"
+
+    services: List[str] = []
+    if service_m:
+      raw_svc = service_m.group(1).strip().split("\n")[0]
+      tokens = re.findall(r'"([^"]+)"|(\S+)', raw_svc)
+      for m1, m2 in tokens:
+        w = (m1 or m2).strip().lower()
+        if w:
+          services.append(w)
+    if not services:
+      services = ["all"]
 
     proto = "ip"
-    port = "any"
-    if svc in WELL_KNOWN_PORT_NAMES:
-      proto = "tcp"
-      port = str(WELL_KNOWN_PORT_NAMES[svc])
+    ports: List[str] = []
+    for s in services:
+      if s in WELL_KNOWN_PORT_NAMES:
+        ports.append(str(WELL_KNOWN_PORT_NAMES[s]))
+        proto = "tcp"
+      elif s == "all":
+        ports.append("any")
+
+    port = ",".join(ports) if ports else "any"
+    if "any" in ports:
+      port = "any"
+
+    comment = name_m.group(1) if name_m else f"policy-{pol_id}"
 
     src_cidr = "0.0.0.0/0" if s_addr.lower() == "all" else s_addr
     dst_cidr = "0.0.0.0/0" if d_addr.lower() == "all" else d_addr
@@ -448,8 +530,8 @@ def parse_fortigate(text: str) -> List[NormalizedRule]:
             dst_port=port,
             enabled=not bool(status_m),
             raw_line=(
-                f"edit {pol_id} ({chain}: {s_addr} -> {d_addr} service {svc}"
-                f" action {act})"
+                f"edit {pol_id} ({chain}: {s_addr} -> {d_addr} service"
+                f" {' '.join(services)} action {act})"
             ),
             comment=comment,
         )
@@ -711,6 +793,7 @@ def audit_rules(
         and r_sub.dst_cidr == "0.0.0.0/0"
         and r_sub.protocol in ("ip", "all", "any")
         and r_sub.dst_port == "any"
+        and not r_sub.conn_state
     ):
       rem, roll = generate_remediation_cli(
           "PERMISSIVE_ANY_ANY", r_sub, None, r_sub.vendor

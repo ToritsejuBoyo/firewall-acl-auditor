@@ -57,7 +57,7 @@ class TestSuite:
 def run_tests():
     suite = TestSuite()
     print("==================================================================")
-    print("  firewall-acl-auditor Comprehensive 30-Scenario Stress Test Suite")
+    print("  firewall-acl-auditor Comprehensive 38-Scenario Stress Test Suite")
     print("==================================================================")
 
     # Test 01: Empty Configuration
@@ -471,8 +471,110 @@ access-list OUT extended deny udp any host 10.0.0.1 eq 53
     except Exception as exc:
         suite.record(30, "Large ruleset benchmark", False, str(exc))
 
+    # Test 31: MikroTik Connection-State Established Filter Not Flagged as ANY-ANY
+    try:
+        cfg = """
+/ip firewall filter
+add action=accept chain=forward comment="Established-Related" connection-state=established,related
+"""
+        rules = parse_mikrotik(cfg)
+        findings, _ = audit_rules(rules, "mikrotik")
+        any_any = any(f.category == "PERMISSIVE_ANY_ANY" for f in findings)
+        suite.record(31, "MikroTik established/related connection tracking rule is not false-positive ANY-ANY", not any_any)
+    except Exception as exc:
+        suite.record(31, "MikroTik established filter", False, str(exc))
+
+    # Test 32: MikroTik Connection-State Established Does Not Shadow Forward Drop
+    try:
+        cfg = """
+/ip firewall filter
+add action=accept chain=forward comment="Established-Traffic" connection-state=established,related
+add action=drop chain=forward comment="Drop-Bad-Subnet" src-address=192.168.1.0/24
+"""
+        rules = parse_mikrotik(cfg)
+        findings, _ = audit_rules(rules, "mikrotik")
+        shadowed = any(f.category == "SHADOWED_CONFLICT" for f in findings)
+        suite.record(32, "MikroTik established stateful rule does not falsely shadow subsequent drop rule", not shadowed)
+    except Exception as exc:
+        suite.record(32, "MikroTik stateful shadowing", False, str(exc))
+
+    # Test 33: Multiport Comma-Separated List (80,443) Isolation
+    try:
+        r1 = NormalizedRule("generic", "ACL", "1", "permit", "tcp", "0.0.0.0/0", "0.0.0.0/0", "80,443", True, "rule 1")
+        r2 = NormalizedRule("generic", "ACL", "2", "deny", "tcp", "0.0.0.0/0", "0.0.0.0/0", "22", True, "rule 2")
+        findings, _ = audit_rules([r1, r2], "generic")
+        shadowed = any(f.category == "SHADOWED_CONFLICT" for f in findings)
+        suite.record(33, "Multiport rule (80,443) does not false-positive shadow port 22", not shadowed)
+    except Exception as exc:
+        suite.record(33, "Multiport port 22 isolation", False, str(exc))
+
+    # Test 34: Broad Port Range Shadows Multiport Subset
+    try:
+        r1 = NormalizedRule("generic", "ACL", "1", "permit", "tcp", "0.0.0.0/0", "0.0.0.0/0", "80-500", True, "rule 1")
+        r2 = NormalizedRule("generic", "ACL", "2", "deny", "tcp", "0.0.0.0/0", "0.0.0.0/0", "80,443", True, "rule 2")
+        findings, _ = audit_rules([r1, r2], "generic")
+        shadowed = any(f.category == "SHADOWED_CONFLICT" for f in findings)
+        suite.record(34, "Broad port range (80-500) correctly shadows multiport subset (80,443)", shadowed)
+    except Exception as exc:
+        suite.record(34, "Broad port range shadowing multiport", False, str(exc))
+
+    # Test 35: Narrow Port Does Not Shadow Multiport Rule
+    try:
+        r1 = NormalizedRule("generic", "ACL", "1", "permit", "tcp", "0.0.0.0/0", "0.0.0.0/0", "80", True, "rule 1")
+        r2 = NormalizedRule("generic", "ACL", "2", "deny", "tcp", "0.0.0.0/0", "0.0.0.0/0", "80,443", True, "rule 2")
+        findings, _ = audit_rules([r1, r2], "generic")
+        shadowed = any(f.category == "SHADOWED_CONFLICT" for f in findings)
+        suite.record(35, "Narrow port (80) does not shadow multiport rule (80,443)", not shadowed)
+    except Exception as exc:
+        suite.record(35, "Narrow port does not shadow multiport", False, str(exc))
+
+    # Test 36: FortiGate Multiple Quoted Services
+    try:
+        cfg = """
+config firewall policy
+    edit 10
+        set name "Web-Services"
+        set srcintf "lan"
+        set dstintf "wan"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action accept
+        set service "HTTP" "HTTPS"
+    next
+end
+"""
+        rules = parse_fortigate(cfg)
+        r = rules[0]
+        valid = "80" in r.dst_port and "443" in r.dst_port and r.dst_port != "any"
+        suite.record(36, "FortiGate multiple quoted services ('HTTP' 'HTTPS') parsed into port list (80,443)", valid)
+    except Exception as exc:
+        suite.record(36, "FortiGate multiple services", False, str(exc))
+
+    # Test 37: Cisco Wildcard Mask Inversion (0.0.255.255 to /16)
+    try:
+        cfg = """
+access-list IN extended permit ip 10.1.0.0 0.0.255.255 any
+"""
+        rules = parse_cisco(cfg)
+        suite.record(37, "Cisco IOS wildcard mask (10.1.0.0 0.0.255.255) converted to CIDR 10.1.0.0/16", rules[0].src_cidr == "10.1.0.0/16")
+    except Exception as exc:
+        suite.record(37, "Cisco wildcard mask inversion", False, str(exc))
+
+    # Test 38: Inactive / Disabled Rule Shadows No One
+    try:
+        cfg = """
+access-list IN extended permit ip any any inactive
+access-list IN extended deny ip 10.0.0.0 255.0.0.0 any
+"""
+        rules = parse_cisco(cfg)
+        findings, _ = audit_rules(rules, "cisco")
+        shadowed = any(f.category == "SHADOWED_CONFLICT" for f in findings)
+        suite.record(38, "Inactive rule does not participate in shadowing active deny rules", not shadowed)
+    except Exception as exc:
+        suite.record(38, "Inactive rule shadowing exclusion", False, str(exc))
+
     print("==================================================================")
-    print(f"  STRESS TEST SUMMARY: {suite.passed} PASSED, {suite.failed} FAILED out of 30 tests")
+    print(f"  STRESS TEST SUMMARY: {suite.passed} PASSED, {suite.failed} FAILED out of {len(suite.results)} tests")
     print("==================================================================")
 
     if suite.failed > 0:
