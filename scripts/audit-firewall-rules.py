@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass, field
+import functools
 import hashlib
 import ipaddress
 import json
@@ -168,13 +169,14 @@ class Sanitizer:
     return clean
 
 
-def normalize_network(net_str: str) -> ipaddress.IPv4Network:
-  s = net_str.strip().lower()
+@functools.lru_cache(maxsize=4096)
+def normalize_network(net_str: Any) -> ipaddress.IPv4Network:
+  s = str(net_str).strip().lower()
   if s in ("any", "any4", "all", "0.0.0.0/0", "0.0.0.0 255.255.255.255", ""):
     return ipaddress.IPv4Network("0.0.0.0/0")
   try:
     return ipaddress.IPv4Network(s, strict=False)
-  except ValueError:
+  except (ValueError, TypeError):
     return ipaddress.IPv4Network("0.0.0.0/0")
 
 
@@ -186,8 +188,9 @@ def is_proto_superset(super_proto: str, sub_proto: str) -> bool:
   return sp == subp
 
 
-def parse_port_range(p_str: str) -> Tuple[int, int]:
-  s = p_str.strip().lower()
+@functools.lru_cache(maxsize=4096)
+def parse_port_range(p_str: Any) -> Tuple[int, int]:
+  s = str(p_str).strip().lower()
   if s in ("any", "all", ""):
     return (0, 65535)
   if s in WELL_KNOWN_PORT_NAMES:
@@ -196,11 +199,12 @@ def parse_port_range(p_str: str) -> Tuple[int, int]:
   if "-" in s:
     parts = s.split("-", 1)
     try:
-      return (int(parts[0]), int(parts[1]))
+      p1, p2 = int(parts[0]), int(parts[1])
+      return (max(0, min(65535, min(p1, p2))), max(0, min(65535, max(p1, p2))))
     except ValueError:
       return (0, 65535)
   try:
-    val = int(s)
+    val = max(0, min(65535, int(s)))
     return (val, val)
   except ValueError:
     return (0, 65535)
@@ -270,16 +274,15 @@ def parse_cisco(text: str) -> List[NormalizedRule]:
     acl_name = current_acl
     seq = str(seq_counter)
 
-    m_asa = re.match(
-        r"^access-list\s+(\S+)\s+(?:line\s+(\d+)\s+)?(?:extended\s+)?(.*)$",
-        work,
-        re.IGNORECASE,
-    )
+    m_asa = re.match(r"^access-list\s+(\S+)\s+(.*)$", work, re.IGNORECASE)
     if m_asa:
       acl_name = m_asa.group(1)
-      if m_asa.group(2):
-        seq = m_asa.group(2)
-      work = m_asa.group(3)
+      work = m_asa.group(2)
+      m_line = re.search(r"\bline\s+(\d+)\b", work, re.IGNORECASE)
+      if m_line:
+        seq = m_line.group(1)
+        work = re.sub(r"\bline\s+\d+\b", "", work, flags=re.IGNORECASE).strip()
+      work = re.sub(r"\bextended\b", "", work, flags=re.IGNORECASE).strip()
     else:
       m_seq = re.match(r"^(\d+)\s+(.*)$", work)
       if m_seq:
@@ -456,35 +459,50 @@ def parse_fortigate(text: str) -> List[NormalizedRule]:
 
 def parse_normalized_json(text: str) -> List[NormalizedRule]:
   data = json.loads(text)
-  if not isinstance(data, list):
-    raise ValueError("JSON input must be a list of rule objects")
+  if isinstance(data, dict):
+    if "rules" in data and isinstance(data["rules"], list):
+      data = data["rules"]
+    elif "value" in data and isinstance(data["value"], list):
+      data = data["value"]
+    else:
+      data = [data]
+  elif not isinstance(data, list):
+    raise ValueError("JSON input must be a list of rule objects or dict containing 'rules'")
 
   rules: List[NormalizedRule] = []
   for idx, item in enumerate(data, start=1):
+    if not isinstance(item, dict):
+      continue
     src_prefixes = item.get(
         "src_prefixes", [item.get("src_cidr", "0.0.0.0/0")]
     )
+    if not src_prefixes:
+      src_prefixes = ["0.0.0.0/0"]
     dst_prefixes = item.get(
         "dst_prefixes", [item.get("dst_cidr", "0.0.0.0/0")]
     )
+    if not dst_prefixes:
+      dst_prefixes = ["0.0.0.0/0"]
     dst_ports = item.get("dst_ports", [item.get("dst_port", "any")])
-    status = item.get("status", "enabled").lower()
+    if not dst_ports:
+      dst_ports = ["any"]
+    status = str(item.get("status", "enabled")).lower()
 
     rules.append(
         NormalizedRule(
-            vendor=item.get("vendor", "generic"),
-            chain_or_acl=item.get(
+            vendor=str(item.get("vendor", "generic")),
+            chain_or_acl=str(item.get(
                 "policy_group", item.get("chain_or_acl", "GLOBAL")
-            ),
+            )),
             seq_or_id=str(item.get("rule_id", item.get("seq_or_id", str(idx)))),
-            action=item.get("action", "permit").lower(),
-            protocol=item.get("protocol", "ip").lower(),
+            action=str(item.get("action", "permit")).lower(),
+            protocol=str(item.get("protocol", "ip")).lower(),
             src_cidr=str(normalize_network(src_prefixes[0])),
             dst_cidr=str(normalize_network(dst_prefixes[0])),
             dst_port=str(dst_ports[0]),
             enabled=(status != "disabled"),
-            raw_line=item.get("raw_text", item.get("raw_line", f"Rule-{idx}")),
-            comment=item.get("comment", ""),
+            raw_line=str(item.get("raw_text", item.get("raw_line", f"Rule-{idx}"))),
+            comment=str(item.get("comment", "")),
         )
     )
   return rules
