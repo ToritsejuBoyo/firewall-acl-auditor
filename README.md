@@ -2,6 +2,13 @@
 
 ![firewall-acl-auditor Demo](assets/demo.gif)
 
+[![tests](https://github.com/ToritsejuBoyo/firewall-acl-auditor/actions/workflows/tests.yml/badge.svg)](https://github.com/ToritsejuBoyo/firewall-acl-auditor/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)]()
+[![Dependencies](https://img.shields.io/badge/dependencies-zero%20(stdlib%20only)-brightgreen.svg)](CONTRIBUTING.md)
+[![Security](https://img.shields.io/badge/security-read--only%20%7C%20no%20egress-informational.svg)](SECURITY.md)
+[![Standard](https://img.shields.io/badge/standard-agentskills.io-blueviolet.svg)](https://agentskills.io)
+
 > An HD recording is available in [`assets/demo.mp4`](assets/demo.mp4).
 
 Deterministic multi-vendor firewall and access-list (ACL) conflict auditor for **Cisco ASA / IOS**, **Fortinet FortiGate (FortiOS)**, and **MikroTik RouterOS**. Normalizes disparate firewall exports into a canonical packet-space schema, mathematically detects shadowed and redundant rules using pure bitwise subnet math, and generates vendor-accurate CLI cleanup commands with atomic rollback scripts.

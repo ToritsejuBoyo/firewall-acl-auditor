@@ -1,6 +1,18 @@
 ---
 name: firewall-acl-auditor
-description: Audit multi-vendor firewall and router ACL configurations (Cisco IOS/IOS-XE/ASA, Fortinet FortiGate FortiOS, and MikroTik RouterOS v6/v7) to detect shadowed rules, redundant entries, overly permissive ANY-ANY rules, high-risk exposed management ports, and missing logging, and generate vendor-accurate remediation CLI scripts with rollback commands. Use whenever a network or security engineer needs to review firewall configs, clean up legacy ACLs, or convert rules across Cisco, FortiGate, and MikroTik.
+description: >-
+  Audit multi-vendor firewall and router ACL configurations (Cisco IOS/IOS-XE/ASA, Fortinet
+  FortiGate FortiOS, and MikroTik RouterOS v6/v7) to detect shadowed rules, redundant entries,
+  overly permissive ANY-ANY rules, high-risk exposed management ports, and missing logging, and
+  generate vendor-accurate remediation CLI scripts with rollback commands. Use whenever a network
+  or security engineer needs to review firewall configs, clean up legacy ACLs, or convert rules
+  across Cisco, FortiGate, and MikroTik.
+license: MIT
+version: 1.0.0
+metadata:
+  standard: agentskills.io
+  dependencies: none (Python standard library only)
+  access: read-only collectors; no state is modified on target systems
 ---
 
 # Multi-Vendor Firewall & ACL Conflict Auditor (`firewall-acl-auditor`)
@@ -79,3 +91,31 @@ If `--generate-proof-of-work` is requested:
 - **Auditor Script:** `scripts/audit-firewall-rules.py` (Zero-dependency Python 3 parser supporting Cisco IOS/ASA, FortiGate, and MikroTik RouterOS with CIDR subset math).
 - **Technical Reference:** `references/vendor-acl-syntax-and-conflict-matrix.md` (Cross-vendor syntax translation, implicit end-of-chain behavior, and anti-lockout commands).
 - **Output Template:** `assets/firewall-audit-remediation-template.md` (Standard firewall audit report and CAB remediation script template).
+
+---
+
+## Data Handling & Sanitization
+
+Sanitization runs **client-side, before any output is produced**, so credentials and
+personal data are removed on the operator's machine rather than being sent to a model
+or pasted into a ticket.
+
+Two layers apply:
+
+1. This skill's own domain-aware masking (hostnames, accounts, and the identifiers
+   specific to this domain).
+2. A shared residual pass, [`scripts/sanitizer.py`](scripts/sanitizer.py), vendored
+   identically across every skill in the library. It is the common floor: private keys,
+   cloud provider keys, JWTs and bearer tokens, connection-string passwords, assigned
+   secrets, emails, IPv4/IPv6 addresses, MAC addresses, GUIDs, SSNs, payment card
+   numbers, and phone numbers.
+
+This skill runs the shared pass with IPv4/IPv6 redaction disabled, because addresses and subnets are the subject of the audit - masking them would make the findings meaningless. Its own vendor-aware masking still applies to addresses, and credential redaction is unaffected.
+
+The contract is enforced by `tests/sanitizer_conformance_test.py`, which runs the same
+adversarial corpus in every skill. Documentation placeholders (RFC 5737/3849 addresses,
+RFC 7042 MAC ranges, `example.com` names, and existing `[REDACTED-*]` tokens) are
+preserved, so the pass is safe to apply more than once.
+
+Sanitization is thorough and tested, but it is not a substitute for reading output
+before sharing it outside your organization.
