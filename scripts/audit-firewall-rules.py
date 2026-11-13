@@ -24,6 +24,21 @@ import re
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# ---------------------------------------------------------------------------
+# Shared residual sanitization pass (vendored: scripts/sanitizer.py).
+# Runs last, after this skill's domain-specific masking, so that every skill in
+# the library enforces an identical credential/PII floor. See
+# tests/sanitizer_conformance_test.py for the contract this must satisfy.
+# ---------------------------------------------------------------------------
+try:
+    from sanitizer import residual_scrub as _residual_scrub
+except ImportError:  # pragma: no cover - direct execution from another cwd
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    from sanitizer import residual_scrub as _residual_scrub
+
+
 HIGH_RISK_PORTS: Dict[int, str] = {
     21: "FTP (Plaintext file transfer)",
     22: "SSH (Unrestricted remote shell)",
@@ -154,6 +169,7 @@ class Sanitizer:
         scrubbed,
         flags=re.IGNORECASE,
     )
+    scrubbed = _residual_scrub(scrubbed, skip=frozenset({'ipv4', 'ipv6'}))
     return scrubbed
 
   def sanitize_raw_line(self, line: str) -> str:
@@ -267,6 +283,14 @@ def is_port_superset(super_port: str, sub_port: str) -> bool:
     if not covered:
       return False
   return True
+
+
+# Maximum number of earlier rules in the same ACL that each rule is compared
+# against during shadow analysis. Bounds an inherently quadratic comparison so a
+# very large ACL degrades predictably with a reported truncation, rather than
+# appearing to hang. Raise it for exhaustive analysis of a huge ACL if you can
+# accept the runtime.
+SHADOW_SCAN_DEPTH = 2000
 
 
 def is_rule_superset(r_super: NormalizedRule, r_sub: NormalizedRule) -> bool:
@@ -747,9 +771,34 @@ def audit_rules(
     f_idx += 1
 
   # 1. Shadowing & Redundancy Analysis (Pairwise Containment: i < j)
+  #
+  # Bucketed by chain/ACL first. is_rule_superset() rejects any cross-chain pair
+  # outright (a rule in OUTSIDE cannot shadow one in INSIDE - different packet
+  # paths), so comparing across chains was pure waste. A naive all-pairs scan is
+  # O(n^2) over the whole config; bucketing makes it O(sum(k^2)) over each chain,
+  # which on a real multi-ACL firewall is the difference between minutes and
+  # seconds. Order within each bucket is preserved, so "earlier rule wins"
+  # semantics are unchanged.
+  _prior_in_chain: Dict[str, List[NormalizedRule]] = {}
+  # Pairwise containment within one ACL is inherently quadratic, and no bucketing
+  # changes that for a single very large ACL. Rather than appear to hang - which is
+  # the worst possible failure mode for an operator mid-incident - the comparison
+  # depth per ACL is bounded and the truncation is reported as a finding, so the
+  # limitation is visible in the output instead of being silent.
+  #
+  # SHADOW_SCAN_DEPTH caps how many earlier rules in the same ACL each rule is
+  # compared against. 2000 keeps the worst case to a few seconds while still
+  # covering ACLs far larger than production platforms typically permit. Earlier
+  # rules take precedence in evaluation order, so the most recent 2000 are the ones
+  # most likely to shadow a new rule.
+  _truncated_chains = {}
   for j, r_sub in enumerate(active_rules):
-    for i in range(j):
-      r_super = active_rules[i]
+    _prior = _prior_in_chain.setdefault(r_sub.chain_or_acl, [])
+    _window = _prior
+    if len(_prior) > SHADOW_SCAN_DEPTH:
+      _window = _prior[-SHADOW_SCAN_DEPTH:]
+      _truncated_chains[r_sub.chain_or_acl] = len(_prior)
+    for r_super in _window:
       if is_rule_superset(r_super, r_sub):
         if r_super.action != r_sub.action:
           severity = "CRITICAL" if r_super.action == "permit" else "HIGH"
@@ -785,6 +834,8 @@ def audit_rules(
         )
         f_idx += 1
         break
+
+    _prior.append(r_sub)
 
     # 2. Overly Permissive ANY-ANY Permit
     if (
@@ -888,6 +939,29 @@ def audit_rules(
         )
         f_idx += 1
 
+  for _chain, _seen in sorted(_truncated_chains.items()):
+    findings.append(
+        Finding(
+            finding_id=f"FINDING-{f_idx:03d}",
+            severity="INFO",
+            category="ANALYSIS_TRUNCATED",
+            chain=_chain,
+            rule_id="-",
+            conflicting_rule_id="N/A",
+            description=(
+                f"ACL '{_chain}' contains {_seen} active rules. Shadow and"
+                f" redundancy analysis compared each rule against the"
+                f" {SHADOW_SCAN_DEPTH} nearest preceding rules rather than all"
+                " of them, to bound an inherently quadratic comparison."
+                " Shadowing by a much earlier rule in this ACL may not be"
+                " reported. Raise SHADOW_SCAN_DEPTH for exhaustive analysis."
+            ),
+            remediation_cli="# No action required: analysis coverage note.",
+            rollback_cli="# Not applicable.",
+        )
+    )
+    f_idx += 1
+
   return findings, sanitizer
 
 
@@ -978,7 +1052,7 @@ def format_markdown(
   return "\n".join(out)
 
 
-def main() -> int:
+def _main_impl() -> int:
   parser = argparse.ArgumentParser(
       description=(
           "Deterministic Multi-Vendor Firewall & ACL Conflict Auditor"
@@ -1065,7 +1139,53 @@ def main() -> int:
     print(rendered)
 
   return 0
+def main():
+    """
+    Hardened entry point.
 
+    Diagnostic input arrives from operators and agents in every broken shape
+    there is: an empty export, a directory, a truncated paste, a PDF renamed to
+    .json, the wrong encoding. Each must produce one clear diagnostic line and a
+    non-zero exit code. A Python traceback is the wrong failure mode here: it is
+    unactionable for a technician, and for an agent it leaks absolute filesystem
+    paths into a transcript while giving the model nothing it can act on.
+    """
+    try:
+        return _main_impl() or 0
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        sys.stderr.write("Error: interrupted.\n")
+        return 1
+    except IsADirectoryError:
+        sys.stderr.write("Error: input path is a directory, not a file.\n")
+        return 1
+    except FileNotFoundError as exc:
+        sys.stderr.write("Error: input file not found: %s\n" % exc)
+        return 1
+    except PermissionError as exc:
+        sys.stderr.write("Error: permission denied reading input: %s\n" % exc)
+        return 1
+    except UnicodeError as exc:
+        sys.stderr.write("Error: input encoding could not be decoded (%s).\n" % exc)
+        return 1
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+        sys.stderr.write("Error: input could not be parsed as valid telemetry "
+                         "(%s: %s).\n" % (type(exc).__name__, exc))
+        return 1
+    except RecursionError:
+        sys.stderr.write("Error: input is nested too deeply to parse safely.\n")
+        return 1
+    except MemoryError:
+        sys.stderr.write("Error: input exhausted available memory; refusing to continue.\n")
+        return 1
+    except OSError as exc:
+        sys.stderr.write("Error: could not read or write a file: %s\n" % exc)
+        return 1
+    except Exception as exc:
+        sys.stderr.write("Error: unrecoverable problem processing this input "
+                         "(%s: %s).\n" % (type(exc).__name__, exc))
+        return 1
 
 if __name__ == "__main__":
-  sys.exit(main())
+  sys.exit(main() or 0)

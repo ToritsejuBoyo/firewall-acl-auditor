@@ -1,0 +1,150 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: py${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Confirm zero third-party dependencies
+        shell: bash
+        run: |
+          # This library is stdlib-only by design (Rule 3). Fail loudly if a
+          # requirements file or third-party import appears.
+          if ls requirements*.txt pyproject.toml setup.py 2>/dev/null | grep -q .; then
+            echo "::error::Dependency manifest found; this skill must remain stdlib-only."
+            exit 1
+          fi
+          python - <<'EOF'
+          import ast, pathlib, sys
+          STDLIB = set(sys.stdlib_module_names)
+          local = {p.stem for p in pathlib.Path('scripts').glob('*.py')}
+          local |= {p.stem for p in pathlib.Path('tests').glob('*.py')}
+          bad = []
+          for path in list(pathlib.Path('scripts').rglob('*.py')) + list(pathlib.Path('tests').rglob('*.py')):
+              tree = ast.parse(path.read_text(encoding='utf-8'))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      names = [a.name.split('.')[0] for a in node.names]
+                  elif isinstance(node, ast.ImportFrom):
+                      names = [(node.module or '').split('.')[0]] if node.level == 0 else []
+                  else:
+                      continue
+                  for name in names:
+                      if name and name not in STDLIB and name not in local:
+                          bad.append(f"{path}: {name}")
+          if bad:
+              print("::error::Third-party imports found:")
+              for item in bad:
+                  print(f"  {item}")
+              raise SystemExit(1)
+          print("stdlib-only check passed")
+          EOF
+
+      - name: Byte-compile all scripts and tests
+        run: python -m compileall -q scripts tests
+
+      - name: Run test suites
+        shell: bash
+        run: |
+          # Every file in tests/ is a self-contained runner that must exit 0.
+          failed=0
+          for test in tests/*.py; do
+            case "$(basename "$test")" in
+              __init__.py) continue ;;
+            esac
+            echo "::group::$test"
+            if python "$test"; then
+              echo "PASS $test"
+            else
+              echo "::error file=$test::suite failed"
+              failed=$((failed + 1))
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "$failed suite(s) failed"
+            exit 1
+          fi
+          echo "All suites passed"
+
+  skill-contract:
+    name: skill contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate SKILL.md frontmatter and resource wiring
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import pathlib, re, sys
+
+          errors = []
+          skill = pathlib.Path('SKILL.md')
+          if not skill.exists():
+              print('::error::SKILL.md is missing')
+              raise SystemExit(1)
+
+          text = skill.read_text(encoding='utf-8')
+
+          # --- frontmatter ---
+          match = re.match(r'^---\n(.*?)\n---\n', text, re.DOTALL)
+          if not match:
+              errors.append('SKILL.md has no YAML frontmatter block')
+          else:
+              front = match.group(1)
+              for field in ('name', 'description', 'license', 'version'):
+                  if not re.search(r'(?m)^%s:' % field, front):
+                      errors.append('frontmatter missing required field: %s' % field)
+              desc = re.search(r'(?ms)^description:\s*(?:>-?|\|-?)?\s*\n?(.*?)(?=^[a-z_]+:|\Z)', front)
+              if desc:
+                  # Collapse the YAML block scalar to one line first: wrapping can
+                  # split the trigger phrase across lines ("Use\n  whenever ...").
+                  flat = ' '.join(desc.group(1).split())
+                  if not re.search(r'(?i)\buse (this skill )?when(ever)?\b', flat):
+                      errors.append('description has no "Use when ..." trigger clause')
+
+          # --- every bundled resource must be referenced from SKILL.md ---
+          for folder in ('scripts', 'references', 'assets'):
+              for path in sorted(pathlib.Path(folder).glob('*')) if pathlib.Path(folder).is_dir() else []:
+                  if path.is_dir() or path.suffix in {'.gif', '.mp4', '.png', '.jpg', '.xlsx'}:
+                      continue
+                  if path.name not in text:
+                      errors.append('%s is never referenced from SKILL.md (dead weight)' % path.as_posix())
+
+          if errors:
+              for err in errors:
+                  print('::error::%s' % err)
+              raise SystemExit(1)
+          print('skill contract OK')
+          EOF
