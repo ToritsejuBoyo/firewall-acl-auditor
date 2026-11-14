@@ -18,11 +18,14 @@ jobs:
   test:
     name: py${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Floor is 3.10, not 3.9. Python 3.9 reached end of life in October 2025 and is
+    # no longer provided on current runner images, and the test harness uses
+    # sys.stdlib_module_names, which is 3.10+. Claiming 3.9 would be untested.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.10', '3.11', '3.12', '3.13']
 
     steps:
       - uses: actions/checkout@v4
