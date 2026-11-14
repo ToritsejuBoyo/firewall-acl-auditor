@@ -36,7 +36,7 @@ Every file in `tests/` is a self-contained runner that exits non-zero on failure
 for test in tests/*.py; do python "$test" || echo "FAILED: $test"; done
 ```
 
-CI runs this across Python 3.9-3.13 on Linux, macOS, and Windows. Please check at
+CI runs this across Python 3.10-3.13 on Linux, macOS, and Windows. Please check at
 least one platform locally before opening a pull request.
 
 ## Adding a diagnostic rule
